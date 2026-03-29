@@ -1,72 +1,76 @@
 #!/usr/bin/env python3
-"""Thread pool executor. Zero dependencies."""
-import threading, queue, sys, time
+"""Simple thread pool implementation."""
+import threading, queue, time
 
 class ThreadPool:
-    def __init__(self, num_workers=4):
+    def __init__(self, num_workers: int = 4):
         self.tasks = queue.Queue()
         self.results = {}
         self._lock = threading.Lock()
-        self._counter = 0
+        self._task_id = 0
         self.workers = []
+        self._stop = False
         for _ in range(num_workers):
             t = threading.Thread(target=self._worker, daemon=True)
             t.start()
             self.workers.append(t)
 
     def _worker(self):
-        while True:
-            task_id, fn, args, kwargs = self.tasks.get()
-            if fn is None: break
+        while not self._stop:
             try:
-                result = fn(*args, **kwargs)
-                with self._lock:
-                    self.results[task_id] = ("ok", result)
-            except Exception as e:
-                with self._lock:
-                    self.results[task_id] = ("error", e)
-            self.tasks.task_done()
+                tid, fn, args, kwargs = self.tasks.get(timeout=0.1)
+                try:
+                    result = fn(*args, **kwargs)
+                    with self._lock:
+                        self.results[tid] = ("ok", result)
+                except Exception as e:
+                    with self._lock:
+                        self.results[tid] = ("error", e)
+                self.tasks.task_done()
+            except queue.Empty:
+                continue
 
-    def submit(self, fn, *args, **kwargs):
+    def submit(self, fn, *args, **kwargs) -> int:
         with self._lock:
-            self._counter += 1
-            task_id = self._counter
-        self.tasks.put((task_id, fn, args, kwargs))
-        return Future(self, task_id)
+            self._task_id += 1
+            tid = self._task_id
+        self.tasks.put((tid, fn, args, kwargs))
+        return tid
 
-    def map(self, fn, iterable):
-        futures = [self.submit(fn, item) for item in iterable]
-        return [f.result() for f in futures]
+    def get_result(self, tid: int, timeout: float = 5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if tid in self.results:
+                    return self.results[tid]
+            time.sleep(0.01)
+        return ("timeout", None)
 
-    def shutdown(self, wait=True):
-        for _ in self.workers:
-            self.tasks.put((None, None, None, None))
-        if wait:
-            for t in self.workers: t.join()
+    def wait_all(self):
+        self.tasks.join()
 
-class Future:
-    def __init__(self, pool, task_id):
-        self._pool = pool
-        self._id = task_id
+    def shutdown(self):
+        self._stop = True
+        for t in self.workers:
+            t.join(timeout=1)
 
-    def result(self, timeout=None):
-        start = time.time()
-        while True:
-            with self._pool._lock:
-                if self._id in self._pool.results:
-                    status, val = self._pool.results.pop(self._id)
-                    if status == "error": raise val
-                    return val
-            if timeout and time.time() - start > timeout:
-                raise TimeoutError()
-            time.sleep(0.001)
-
-    def done(self):
-        with self._pool._lock:
-            return self._id in self._pool.results
+def test():
+    pool = ThreadPool(2)
+    ids = []
+    for i in range(10):
+        tid = pool.submit(lambda x: x * x, i)
+        ids.append((tid, i))
+    pool.wait_all()
+    for tid, i in ids:
+        status, val = pool.get_result(tid)
+        assert status == "ok" and val == i * i, f"{i}: {status} {val}"
+    # Error handling
+    tid2 = pool.submit(lambda: 1/0)
+    pool.wait_all()
+    status2, _ = pool.get_result(tid2)
+    assert status2 == "error"
+    pool.shutdown()
+    print("  thread_pool: ALL TESTS PASSED")
 
 if __name__ == "__main__":
-    pool = ThreadPool(4)
-    results = pool.map(lambda x: x*x, range(10))
-    print(f"Squares: {results}")
-    pool.shutdown()
+    test()

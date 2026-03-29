@@ -1,9 +1,11 @@
 # thread-pool
 
-Thread pool executor with futures. Zero dependencies, single file, Python 3.8+.
+Simple thread pool with futures
+
+Zero-dependency, single-file Python 3.8+ CLI tool.
 
 ## Usage
 
 ```bash
-python3 thread_pool.py --help
+python thread_pool.py
 ```
