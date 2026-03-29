@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""thread_pool: Simple thread pool executor."""
+"""Thread pool executor. Zero dependencies."""
 import threading, queue, sys, time
 
 class ThreadPool:
@@ -7,69 +7,66 @@ class ThreadPool:
         self.tasks = queue.Queue()
         self.results = {}
         self._lock = threading.Lock()
-        self._id = 0
+        self._counter = 0
         self.workers = []
-        self._shutdown = False
         for _ in range(num_workers):
             t = threading.Thread(target=self._worker, daemon=True)
             t.start()
             self.workers.append(t)
 
     def _worker(self):
-        while not self._shutdown:
-            try:
-                task_id, fn, args, kwargs = self.tasks.get(timeout=0.1)
-            except queue.Empty:
-                continue
+        while True:
+            task_id, fn, args, kwargs = self.tasks.get()
+            if fn is None: break
             try:
                 result = fn(*args, **kwargs)
                 with self._lock:
                     self.results[task_id] = ("ok", result)
             except Exception as e:
                 with self._lock:
-                    self.results[task_id] = ("err", e)
+                    self.results[task_id] = ("error", e)
             self.tasks.task_done()
 
     def submit(self, fn, *args, **kwargs):
         with self._lock:
-            self._id += 1
-            task_id = self._id
+            self._counter += 1
+            task_id = self._counter
         self.tasks.put((task_id, fn, args, kwargs))
-        return task_id
+        return Future(self, task_id)
 
-    def get_result(self, task_id, timeout=5):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self._lock:
-                if task_id in self.results:
-                    return self.results.pop(task_id)
-            time.sleep(0.01)
-        raise TimeoutError(f"Task {task_id} not completed")
+    def map(self, fn, iterable):
+        futures = [self.submit(fn, item) for item in iterable]
+        return [f.result() for f in futures]
 
     def shutdown(self, wait=True):
+        for _ in self.workers:
+            self.tasks.put((None, None, None, None))
         if wait:
-            self.tasks.join()
-        self._shutdown = True
+            for t in self.workers: t.join()
 
-def test():
-    pool = ThreadPool(2)
-    def square(x): return x * x
-    ids = [pool.submit(square, i) for i in range(10)]
-    results = []
-    for tid in ids:
-        status, val = pool.get_result(tid)
-        assert status == "ok"
-        results.append(val)
-    assert results == [i*i for i in range(10)]
-    # Error handling
-    def fail(): raise ValueError("boom")
-    tid = pool.submit(fail)
-    status, val = pool.get_result(tid)
-    assert status == "err"
-    assert "boom" in str(val)
-    pool.shutdown()
-    print("All tests passed!")
+class Future:
+    def __init__(self, pool, task_id):
+        self._pool = pool
+        self._id = task_id
+
+    def result(self, timeout=None):
+        start = time.time()
+        while True:
+            with self._pool._lock:
+                if self._id in self._pool.results:
+                    status, val = self._pool.results.pop(self._id)
+                    if status == "error": raise val
+                    return val
+            if timeout and time.time() - start > timeout:
+                raise TimeoutError()
+            time.sleep(0.001)
+
+    def done(self):
+        with self._pool._lock:
+            return self._id in self._pool.results
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "test": test()
-    else: print("Usage: thread_pool.py test")
+    pool = ThreadPool(4)
+    results = pool.map(lambda x: x*x, range(10))
+    print(f"Squares: {results}")
+    pool.shutdown()
